@@ -44,7 +44,7 @@ public:
             // Registers
             FixedRegisterOp, VirtualRegisterOp,
             // RTG tests
-            TestOp, TargetOp, YieldOp,
+            TestOp, TargetOp, YieldOp, ValidateOp, TestSuccessOp, TestFailureOp,
             // Integers
             RandomNumberInRangeOp,
             // Sequences
@@ -58,7 +58,7 @@ public:
             // Tuples
             TupleCreateOp, TupleExtractOp,
             // Immediates
-            IntToImmediateOp,
+            IntToImmediateOp, ConcatImmediateOp, SliceImmediateOp,
             // Memories
             MemoryAllocOp, MemoryBaseAddressOp, MemorySizeOp,
             // Memory Blocks
@@ -132,9 +132,14 @@ public:
   HANDLE(TestOp, Unhandled);
   HANDLE(TargetOp, Unhandled);
   HANDLE(YieldOp, Unhandled);
+  HANDLE(ValidateOp, Unhandled);
+  HANDLE(TestSuccessOp, Unhandled);
+  HANDLE(TestFailureOp, Unhandled);
   HANDLE(FixedRegisterOp, Unhandled);
   HANDLE(VirtualRegisterOp, Unhandled);
   HANDLE(IntToImmediateOp, Unhandled);
+  HANDLE(ConcatImmediateOp, Unhandled);
+  HANDLE(SliceImmediateOp, Unhandled);
   HANDLE(MemoryBlockDeclareOp, Unhandled);
   HANDLE(MemoryAllocOp, Unhandled);
   HANDLE(MemoryBaseAddressOp, Unhandled);

@@ -9,6 +9,7 @@
 #include "CIRCTModules.h"
 
 #include "circt-c/Conversion.h"
+#include "circt-c/Dialect/AIG.h"
 #include "circt-c/Dialect/Arc.h"
 #include "circt-c/Dialect/Comb.h"
 #include "circt-c/Dialect/DC.h"
@@ -19,10 +20,13 @@
 #include "circt-c/Dialect/HW.h"
 #include "circt-c/Dialect/HWArith.h"
 #include "circt-c/Dialect/Handshake.h"
+#include "circt-c/Dialect/Kanagawa.h"
 #include "circt-c/Dialect/LTL.h"
 #include "circt-c/Dialect/MSFT.h"
 #include "circt-c/Dialect/OM.h"
+#include "circt-c/Dialect/Pipeline.h"
 #include "circt-c/Dialect/RTG.h"
+#include "circt-c/Synthesis.h"
 #include "circt-c/Transforms.h"
 #ifdef CIRCT_INCLUDE_TESTS
 #include "circt-c/Dialect/RTGTest.h"
@@ -47,6 +51,7 @@
 namespace nb = nanobind;
 
 static void registerPasses() {
+  registerAIGPasses();
   registerArcPasses();
   registerCombPasses();
   registerDCPasses();
@@ -55,7 +60,11 @@ static void registerPasses() {
   registerFSMPasses();
   registerHWArithPasses();
   registerHWPasses();
+  registerRTGPasses();
   registerHandshakePasses();
+  registerKanagawaPasses();
+  registerPipelinePasses();
+  registerSynthesisPipeline();
   mlirRegisterCIRCTConversionPasses();
   mlirRegisterCIRCTTransformsPasses();
   mlirRegisterTransformsCSE();
@@ -75,6 +84,10 @@ NB_MODULE(_circt, m) {
         MlirContext context = mlirPythonCapsuleToContext(wrappedCapsule.ptr());
 
         // Collect CIRCT dialects to register.
+        MlirDialectHandle aig = mlirGetDialectHandle__aig__();
+        mlirDialectHandleRegisterDialect(aig, context);
+        mlirDialectHandleLoadDialect(aig, context);
+
         MlirDialectHandle comb = mlirGetDialectHandle__comb__();
         mlirDialectHandleRegisterDialect(comb, context);
         mlirDialectHandleLoadDialect(comb, context);
@@ -115,6 +128,10 @@ NB_MODULE(_circt, m) {
         mlirDialectHandleRegisterDialect(om, context);
         mlirDialectHandleLoadDialect(om, context);
 
+        MlirDialectHandle pipeline = mlirGetDialectHandle__pipeline__();
+        mlirDialectHandleRegisterDialect(pipeline, context);
+        mlirDialectHandleLoadDialect(pipeline, context);
+
         MlirDialectHandle rtg = mlirGetDialectHandle__rtg__();
         mlirDialectHandleRegisterDialect(rtg, context);
         mlirDialectHandleLoadDialect(rtg, context);
@@ -141,6 +158,10 @@ NB_MODULE(_circt, m) {
         mlirDialectHandleRegisterDialect(handshake, context);
         mlirDialectHandleLoadDialect(handshake, context);
 
+        MlirDialectHandle kanagawa = mlirGetDialectHandle__kanagawa__();
+        mlirDialectHandleRegisterDialect(kanagawa, context);
+        mlirDialectHandleLoadDialect(kanagawa, context);
+
         MlirDialectHandle ltl = mlirGetDialectHandle__ltl__();
         mlirDialectHandleRegisterDialect(ltl, context);
         mlirDialectHandleLoadDialect(ltl, context);
@@ -166,6 +187,8 @@ NB_MODULE(_circt, m) {
     mlirExportSplitVerilog(mod, cDirectory);
   });
 
+  nb::module_ aig = m.def_submodule("_aig", "AIG API");
+  circt::python::populateDialectAIGSubmodule(aig);
   nb::module_ esi = m.def_submodule("_esi", "ESI API");
   circt::python::populateDialectESISubmodule(esi);
   nb::module_ msft = m.def_submodule("_msft", "MSFT API");

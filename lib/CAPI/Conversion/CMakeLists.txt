@@ -10,9 +10,12 @@ add_circt_public_c_api_library(CIRCTCAPIConversion
   CIRCTCalyxNative
   CIRCTCombToAIG
   CIRCTCombToArith
+  CIRCTCombToDatapath
   CIRCTCombToLLVM
   CIRCTCombToSMT
   CIRCTConvertToArcs
+  CIRCTDatapathToComb
+  CIRCTDatapathToSMT
   CIRCTDCToHW
   CIRCTExportChiselInterface
   CIRCTExportVerilog

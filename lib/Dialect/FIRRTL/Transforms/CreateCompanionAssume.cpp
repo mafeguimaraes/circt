@@ -49,15 +49,16 @@ struct CreateCompanionAssumePass
       // Copy messages once we confirmed that it works well with UNR tools.
       if (isUnrOnlyAssert)
         // If UNROnly, use UnclockedAssumeIntrinsicOp.
-        assume = builder.create<firrtl::UnclockedAssumeIntrinsicOp>(
-            assertOp.getLoc(), assertOp.getPredicate(), assertOp.getEnable(),
-            emptyMessage, ValueRange{}, assertOp.getName());
+        assume = firrtl::UnclockedAssumeIntrinsicOp::create(
+            builder, assertOp.getLoc(), assertOp.getPredicate(),
+            assertOp.getEnable(), emptyMessage, ValueRange{},
+            assertOp.getName());
       else
         // Otherwise use concurrent assume.
-        assume = builder.create<firrtl::AssumeOp>(
-            assertOp.getLoc(), assertOp.getClock(), assertOp.getPredicate(),
-            assertOp.getEnable(), emptyMessage, ValueRange{},
-            assertOp.getName(),
+        assume = firrtl::AssumeOp::create(
+            builder, assertOp.getLoc(), assertOp.getClock(),
+            assertOp.getPredicate(), assertOp.getEnable(), emptyMessage,
+            ValueRange{}, assertOp.getName(),
             /*isConcurrent=*/true);
 
       // Add a guard "USE_PROPERTY_AS_CONSTRAINT" to companion assumes.
@@ -71,7 +72,3 @@ struct CreateCompanionAssumePass
 };
 
 } // end anonymous namespace
-
-std::unique_ptr<mlir::Pass> circt::firrtl::createCreateCompanionAssume() {
-  return std::make_unique<CreateCompanionAssumePass>();
-}

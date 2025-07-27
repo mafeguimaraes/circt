@@ -3,22 +3,21 @@ target_link_libraries(circt-synth
   PRIVATE
   CIRCTAIG
   CIRCTAIGToComb
-  CIRCTAIGTransforms
   CIRCTAIGAnalysis
   CIRCTComb
-  CIRCTCombToAIG
   CIRCTDebug
   CIRCTEmit
   CIRCTHW
-  CIRCTHWTransforms
   CIRCTLTL
   CIRCTOM
   CIRCTSeq
   CIRCTSim
-  CIRCTSupport
   CIRCTSV
+  CIRCTSVTransforms
+  CIRCTSynthesis
   CIRCTTransforms
   CIRCTVerif
+  MLIRBytecodeWriter
   MLIRIR
   MLIRParser
   LLVMSupport

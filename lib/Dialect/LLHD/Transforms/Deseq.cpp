@@ -1004,13 +1004,13 @@ void Deseq::implementRegisters() {
     implementRegister(drive);
 }
 
-/// Implement the conditional behavior of a drive with a `seq.compreg` or
-/// `seq.compreg.ce` op, and make the drive unconditional. This function pulls
-/// the analyzed clock and reset from the given `DriveInfo` and creates the
-/// necessary ops outside the process represent the behavior as a register. It
-/// also calls `specializeValue` and `specializeProcess` to convert the
-/// sequential `llhd.process` into a purely combinational `llhd.combinational`
-/// that is simplified by assuming that the clock edge occurs.
+/// Implement the conditional behavior of a drive with a `seq.firreg` op and
+/// make the drive unconditional. This function pulls the analyzed clock and
+/// reset from the given `DriveInfo` and creates the necessary ops outside the
+/// process represent the behavior as a register. It also calls
+/// `specializeValue` and `specializeProcess` to convert the sequential
+/// `llhd.process` into a purely combinational `llhd.combinational` that is
+/// simplified by assuming that the clock edge occurs.
 void Deseq::implementRegister(DriveInfo &drive) {
   OpBuilder builder(drive.op);
   auto loc = drive.op.getLoc();
@@ -1019,12 +1019,12 @@ void Deseq::implementRegister(DriveInfo &drive) {
   // negedge clocks.
   auto &clockCast = materializedClockCasts[drive.clock.clock];
   if (!clockCast)
-    clockCast = builder.create<seq::ToClockOp>(loc, drive.clock.clock);
+    clockCast = seq::ToClockOp::create(builder, loc, drive.clock.clock);
   auto clock = clockCast;
   if (!drive.clock.risingEdge) {
     auto &clockInv = materializedClockInverters[clock];
     if (!clockInv)
-      clockInv = builder.create<seq::ClockInverterOp>(loc, clock);
+      clockInv = seq::ClockInverterOp::create(builder, loc, clock);
     clock = clockInv;
   }
 
@@ -1041,8 +1041,8 @@ void Deseq::implementRegister(DriveInfo &drive) {
     if (!drive.reset.activeHigh) {
       auto &inv = materializedInverters[reset];
       if (!inv) {
-        auto one = builder.create<hw::ConstantOp>(loc, builder.getI1Type(), 1);
-        inv = builder.create<comb::XorOp>(loc, reset, one);
+        auto one = hw::ConstantOp::create(builder, loc, builder.getI1Type(), 1);
+        inv = comb::XorOp::create(builder, loc, reset, one);
       }
       reset = inv;
     }
@@ -1096,16 +1096,29 @@ void Deseq::implementRegister(DriveInfo &drive) {
   if (enable)
     enable = specializeValue(enable, fixedValues);
 
+  // Try to guess a name for the register.
+  StringAttr name;
+  if (auto sigOp = drive.op.getSignal().getDefiningOp<llhd::SignalOp>())
+    name = sigOp.getNameAttr();
+  if (!name)
+    name = builder.getStringAttr("");
+
   // Create the register op.
-  Value reg;
-  if (enable)
-    reg = builder.create<seq::CompRegClockEnabledOp>(
-        loc, value, clock, enable, StringAttr{}, reset, resetValue, Value{},
-        hw::InnerSymAttr{});
-  else
-    reg =
-        builder.create<seq::CompRegOp>(loc, value, clock, StringAttr{}, reset,
-                                       resetValue, Value{}, hw::InnerSymAttr{});
+  auto reg = seq::FirRegOp::create(builder, loc, value, clock, name,
+                                   hw::InnerSymAttr{},
+                                   /*preset=*/IntegerAttr{}, reset, resetValue,
+                                   /*isAsync=*/reset != Value{});
+
+  // If the register has an enable, insert a self-mux in front of the register.
+  // Set the `bin` flag on the mux specifically to make up for a subtle
+  // difference between a `if (en) q <= d` enable on a register, and a `q <= en
+  // ? d : q` enable.
+  if (enable) {
+    OpBuilder::InsertionGuard guard(builder);
+    builder.setInsertionPoint(reg);
+    reg.getNextMutable().assign(comb::MuxOp::create(
+        builder, loc, enable, reg.getNext(), reg.getResult(), true));
+  }
 
   // Make the original `llhd.drv` drive the register value unconditionally.
   drive.op.getValueMutable().assign(reg);
@@ -1118,7 +1131,7 @@ void Deseq::implementRegister(DriveInfo &drive) {
       attr.getTime() == 0 && attr.getDelta() == 1 && attr.getEpsilon() == 0) {
     if (!epsilonDelay)
       epsilonDelay =
-          builder.create<ConstantTimeOp>(process.getLoc(), 0, "ns", 0, 1);
+          ConstantTimeOp::create(builder, process.getLoc(), 0, "ns", 0, 1);
     drive.op.getTimeMutable().assign(epsilonDelay);
   }
 }
@@ -1167,8 +1180,8 @@ ValueRange Deseq::specializeProcess(FixedValues fixedValues) {
   // the register operation that consumes the result of this specialized
   // process, such that we can make the process purely combinational.
   OpBuilder builder(process);
-  auto executeOp = builder.create<CombinationalOp>(process.getLoc(),
-                                                   process.getResultTypes());
+  auto executeOp = CombinationalOp::create(builder, process.getLoc(),
+                                           process.getResultTypes());
 
   IRMapping mapping;
   SmallVector<std::pair<Block *, Block *>> worklist;
@@ -1190,8 +1203,8 @@ ValueRange Deseq::specializeProcess(FixedValues fixedValues) {
   auto &entryBlock = executeOp.getRegion().emplaceBlock();
   builder.setInsertionPointToStart(&entryBlock);
   auto i1 = builder.getI1Type();
-  auto trueValue = builder.create<hw::ConstantOp>(process.getLoc(), i1, 1);
-  auto falseValue = builder.create<hw::ConstantOp>(process.getLoc(), i1, 0);
+  auto trueValue = hw::ConstantOp::create(builder, process.getLoc(), i1, 1);
+  auto falseValue = hw::ConstantOp::create(builder, process.getLoc(), i1, 0);
 
   SmallDenseMap<Value, std::pair<Value, Value>, 2> materializedFixedValues;
   for (auto fixedValue : fixedValues) {
@@ -1230,7 +1243,7 @@ ValueRange Deseq::specializeProcess(FixedValues fixedValues) {
           SmallVector<Value> operands;
           for (auto operand : waitOp.getYieldOperands())
             operands.push_back(mapping.lookupOrDefault(operand));
-          builder.create<YieldOp>(waitOp.getLoc(), operands);
+          YieldOp::create(builder, waitOp.getLoc(), operands);
           continue;
         }
 
@@ -1241,17 +1254,17 @@ ValueRange Deseq::specializeProcess(FixedValues fixedValues) {
           if (matchPattern(condition, m_NonZero())) {
             for (auto operand : condBranchOp.getTrueDestOperands())
               operands.push_back(mapping.lookupOrDefault(operand));
-            builder.create<cf::BranchOp>(
-                condBranchOp.getLoc(),
-                scheduleBlock(condBranchOp.getTrueDest()), operands);
+            cf::BranchOp::create(builder, condBranchOp.getLoc(),
+                                 scheduleBlock(condBranchOp.getTrueDest()),
+                                 operands);
             continue;
           }
           if (matchPattern(condition, m_Zero())) {
             for (auto operand : condBranchOp.getFalseOperands())
               operands.push_back(mapping.lookupOrDefault(operand));
-            builder.create<cf::BranchOp>(
-                condBranchOp.getLoc(),
-                scheduleBlock(condBranchOp.getFalseDest()), operands);
+            cf::BranchOp::create(builder, condBranchOp.getLoc(),
+                                 scheduleBlock(condBranchOp.getFalseDest()),
+                                 operands);
             continue;
           }
         }
@@ -1329,7 +1342,7 @@ ValueRange Deseq::specializeProcess(FixedValues fixedValues) {
     assert(pastValues.size() == wait.getDestOperands().size());
     for (auto pastValue : pastValues)
       destOperands.push_back(materializedFixedValues.lookup(pastValue).first);
-    builder.create<cf::BranchOp>(wait.getLoc(), dest, destOperands);
+    cf::BranchOp::create(builder, wait.getLoc(), dest, destOperands);
   }
 
   // Clone everything after the wait operation.

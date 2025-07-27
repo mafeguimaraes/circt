@@ -1,10 +1,15 @@
 add_circt_dialect_library(CIRCTRTGTransforms
   ElaborationPass.cpp
+  EmbedValidationValuesPass.cpp
   EmitRTGISAAssemblyPass.cpp
   InlineSequencesPass.cpp
   LinearScanRegisterAllocationPass.cpp
   LowerUniqueLabelsPass.cpp
+  LowerValidateToLabelsPass.cpp
   MemoryAllocationPass.cpp
+  PrintTestNamesPass.cpp
+  RTGPassPipelines.cpp
+  UniqueValidateOpsPass.cpp
 
   DEPENDS
   CIRCTRTGTransformsIncGen

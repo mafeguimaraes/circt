@@ -183,7 +183,7 @@ InstanceGraph::getInferredTopLevelNodes() {
               return true;
             }
             marked.insert(node);
-            for (auto use : *node) {
+            for (auto *use : *node) {
               InstanceGraphNode *targetModule = use->getTarget();
               candidateTopLevels.remove(targetModule);
               if (cycleUtil(targetModule, trace))
@@ -195,7 +195,7 @@ InstanceGraph::getInferredTopLevelNodes() {
           };
 
   bool cyclic = false;
-  for (auto moduleIt : *this) {
+  for (auto *moduleIt : *this) {
     if (visited.contains(moduleIt))
       continue;
 
@@ -326,6 +326,15 @@ InstancePath InstancePathCache::prependInstance(InstanceOpInterface inst,
   auto *newPath = allocator.Allocate<InstanceOpInterface>(n);
   std::copy(path.begin(), path.end(), newPath + 1);
   newPath[0] = inst;
+  return InstancePath(ArrayRef(newPath, n));
+}
+
+InstancePath InstancePathCache::concatPath(InstancePath path1,
+                                           InstancePath path2) {
+  size_t n = path1.size() + path2.size();
+  auto *newPath = allocator.Allocate<InstanceOpInterface>(n);
+  std::copy(path1.begin(), path1.end(), newPath);
+  std::copy(path2.begin(), path2.end(), newPath + path1.size());
   return InstancePath(ArrayRef(newPath, n));
 }
 

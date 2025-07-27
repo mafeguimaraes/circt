@@ -114,6 +114,14 @@ def LowerUniqueLabelsPass : Pass<"rtg-lower-unique-labels", "mlir::ModuleOp"> {
   ];
 }
 
+def UniqueValidateOpsPass : Pass<"rtg-unique-validate", "mlir::ModuleOp"> {
+  let summary = "compute unique IDs for validate operations";
+  let description = [{
+    This pass visits all 'rtg.validate' operations without an ID attribute and
+    assigns a unique ID to them.
+  }];
+}
+
 def MemoryAllocationPass : Pass<"rtg-memory-allocation", "rtg::TestOp"> {
   let summary = "lower memories to immediates or labels";
   let description = [{
@@ -131,6 +139,61 @@ def MemoryAllocationPass : Pass<"rtg-memory-allocation", "rtg::TestOp"> {
   let statistics = [
     Statistic<"numMemoriesAllocated", "num-memories-allocated",
               "Number of memories allocated from memory blocks.">,
+  ];
+}
+
+def EmbedValidationValuesPass : Pass<"rtg-embed-validation-values",
+                                     "mlir::ModuleOp"> {
+  let summary = "lower validate operations to the externally provided values";
+  let description = [{
+    This pass replaces 'rtg.validate' operations with concrete values read from
+    an external file. The file should contain the expected validation values
+    with matching IDs computed, e.g., by running the program in a simulator.
+
+    Each validate operation is matched with its corresponding value using the
+    unique identifier. If an identifier occurs multiple times in the file, the
+    pass fails. If an identifier for a 'validate' operation is missing in the
+    file, the pass will not modify that operation. Otherwise, the values are
+    parsed according to the implementation provided by the
+    'ValidationTypeInterface' implementation of the 'ref' operand type and
+    materialized in the IR as constants to replace the 'validate' operation.
+
+    This pass is typically used as part of a two-phase compilation process that
+    forks after the 'rtg-unique-valiate' pass is run:
+    1. Run the 'rtg-lower-validate-ops-to-labels' pass and the rest of the
+       pipeline, then simulate the output in a reference simulator to generate
+       a file with the expected values.
+    2. Run this pass and the rest of the pipeline to produce the final test.
+  }];
+
+  let options = [
+    Option<"filename", "filename", "std::string", "",
+           "The file with the validation values.">,
+  ];
+}
+
+def LowerValidateToLabelsPass : Pass<"rtg-lower-validate-to-labels"> {
+  let summary = "lower validation operations to intrinsic labels";
+  let description = [{
+    Lowers the 'rtg.validate' operations to special intrinsic labels understood
+    by the target simulator to print the register contents.
+  }];
+}
+
+def PrintTestNamesPass : Pass<"rtg-print-test-names", "mlir::ModuleOp"> {
+  let summary = "print the names of all tests to the given file";
+  let description = [{
+    Prints the names of all tests in the module to the given file.
+    A CSV format is used with the first column being the properly uniqued name
+    of the test and the second column being the original name of the test as it
+    appeared in the frontend. The original name of a test may occur several
+    times because the test might have been duplicated for multiple targets or
+    because multiple elaborations of the same test/target pair were requested.
+  }];
+
+  let options = [
+    Option<"filename", "filename", "std::string", "\"-\"",
+           "The file to print the test names to.">,
   ];
 }
 

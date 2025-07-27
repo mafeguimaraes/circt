@@ -65,6 +65,23 @@ LogicalResult SnoopValidReadyOp::inferReturnTypes(
   return success();
 }
 
+LogicalResult SnoopTransactionOp::verify() {
+  ChannelType type = getInput().getType();
+  if (type.getInner() != getData().getType())
+    return emitOpError("input and output types must match");
+  return success();
+}
+
+LogicalResult SnoopTransactionOp::inferReturnTypes(
+    MLIRContext *context, std::optional<Location> loc, ValueRange operands,
+    DictionaryAttr attrs, mlir::OpaqueProperties properties,
+    mlir::RegionRange regions, SmallVectorImpl<Type> &results) {
+  auto i1 = IntegerType::get(context, 1);
+  results.push_back(i1);
+  results.push_back(cast<ChannelType>(operands[0].getType()).getInner());
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // FIFO functions.
 //===----------------------------------------------------------------------===//
@@ -568,8 +585,11 @@ void UnpackBundleOp::build(::mlir::OpBuilder &odsBuilder,
 }
 
 LogicalResult PackBundleOp::verify() {
-  if (!getBundle().hasOneUse())
-    return emitOpError("bundles must have exactly one user");
+  if (!getBundle().hasOneUse()) {
+    if (getBundle().getUsers().empty())
+      return emitOpError("bundle must be used");
+    return emitOpError("bundle must only be used once");
+  }
   return success();
 }
 void PackBundleOp::build(::mlir::OpBuilder &odsBuilder,
@@ -584,8 +604,11 @@ void PackBundleOp::build(::mlir::OpBuilder &odsBuilder,
 }
 
 LogicalResult UnpackBundleOp::verify() {
-  if (!getBundle().hasOneUse())
-    return emitOpError("bundles must have exactly one user");
+  if (!getBundle().hasOneUse()) {
+    if (getBundle().getUsers().empty())
+      return emitOpError("bundle must be used");
+    return emitOpError("bundle must only be used once");
+  }
   return success();
 }
 

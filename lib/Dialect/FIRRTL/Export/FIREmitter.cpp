@@ -65,7 +65,7 @@ struct Emitter {
   void emitFormalLike(Operation *op, StringRef keyword, StringAttr symName,
                       StringAttr moduleName, DictionaryAttr params);
   void emitEnabledLayers(ArrayRef<Attribute> layers);
-
+  void emitKnownLayers(ArrayRef<Attribute> layers);
   void emitParamAssign(ParamDeclAttr param, Operation *op,
                        std::optional<PPExtString> wordBeforeLHS = std::nullopt);
   void emitParamValue(Attribute value, Operation *op);
@@ -138,6 +138,7 @@ struct Emitter {
   void emitExpression(ListCreateOp op);
   void emitExpression(UnresolvedPathOp op);
   void emitExpression(GenericIntrinsicOp op);
+  void emitExpression(CatPrimOp op);
 
   void emitPrimExpr(StringRef mnemonic, Operation *op,
                     ArrayRef<uint32_t> attrs = {});
@@ -174,7 +175,6 @@ struct Emitter {
   HANDLE(GTPrimOp, "gt");
   HANDLE(EQPrimOp, "eq");
   HANDLE(NEQPrimOp, "neq");
-  HANDLE(CatPrimOp, "cat");
   HANDLE(DShlPrimOp, "dshl");
   HANDLE(DShlwPrimOp, "dshlw");
   HANDLE(DShrPrimOp, "dshr");
@@ -439,6 +439,16 @@ void Emitter::emitEnabledLayers(ArrayRef<Attribute> layers) {
   }
 }
 
+void Emitter::emitKnownLayers(ArrayRef<Attribute> layers) {
+  for (auto layer : layers) {
+    ps << PP::space;
+    ps.cbox(2, IndentStyle::Block);
+    ps << "knownlayer" << PP::space;
+    emitSymbol(cast<SymbolRefAttr>(layer));
+    ps << PP::end;
+  }
+}
+
 void Emitter::emitParamAssign(ParamDeclAttr param, Operation *op,
                               std::optional<PPExtString> wordBeforeLHS) {
   if (wordBeforeLHS) {
@@ -544,6 +554,7 @@ void Emitter::emitModule(FExtModuleOp op) {
   startStatement();
   ps.cbox(4, IndentStyle::Block);
   ps << "extmodule " << PPExtString(legalize(op.getNameAttr()));
+  emitKnownLayers(op.getKnownLayers());
   emitEnabledLayers(op.getLayers());
   ps << PP::nbsp << ":" << PP::end;
   emitLocation(op);
@@ -1368,7 +1379,7 @@ void Emitter::emitExpression(Value value) {
           // Binary
           AddPrimOp, SubPrimOp, MulPrimOp, DivPrimOp, RemPrimOp, AndPrimOp,
           OrPrimOp, XorPrimOp, LEQPrimOp, LTPrimOp, GEQPrimOp, GTPrimOp,
-          EQPrimOp, NEQPrimOp, CatPrimOp, DShlPrimOp, DShlwPrimOp, DShrPrimOp,
+          EQPrimOp, NEQPrimOp, DShlPrimOp, DShlwPrimOp, DShrPrimOp,
           // Unary
           AsSIntPrimOp, AsUIntPrimOp, AsAsyncResetPrimOp, AsClockPrimOp,
           CvtPrimOp, NegPrimOp, NotPrimOp, AndRPrimOp, OrRPrimOp, XorRPrimOp,
@@ -1376,7 +1387,7 @@ void Emitter::emitExpression(Value value) {
           BitsPrimOp, HeadPrimOp, TailPrimOp, PadPrimOp, MuxPrimOp, ShlPrimOp,
           ShrPrimOp, UninferredResetCastOp, ConstCastOp, StringConstantOp,
           FIntegerConstantOp, BoolConstantOp, DoubleConstantOp, ListCreateOp,
-          UnresolvedPathOp, GenericIntrinsicOp,
+          UnresolvedPathOp, GenericIntrinsicOp, CatPrimOp,
           // Reference expressions
           RefSendOp, RefResolveOp, RefSubOp, RWProbeOp, RefCastOp,
           // Format String expressions
@@ -1579,6 +1590,42 @@ void Emitter::emitPrimExpr(StringRef mnemonic, Operation *op,
     ps << "," << PP::space;
   interleaveComma(attrs, [&](auto attr) { ps.addAsString(attr); });
   ps << ")" << PP::end;
+}
+
+void Emitter::emitExpression(CatPrimOp op) {
+  size_t numOperands = op.getNumOperands();
+  switch (numOperands) {
+  case 0:
+    // Emit "UInt<0>(0)"
+    emitType(op.getType(), false);
+    ps << "(0)";
+    return;
+  case 1: {
+    auto operand = op->getOperand(0);
+    // If there is no sign conversion, just emit the operand.
+    if (isa<UIntType>(operand.getType()))
+      return emitExpression(operand);
+
+    // Emit cat to convert sign.
+    ps << "cat(" << PP::ibox0;
+    emitExpression(op->getOperand(0));
+    ps << "," << PP::space << "SInt<0>(0))" << PP::end;
+    return;
+  }
+
+  default:
+    // Construct a linear tree of cats.
+    for (size_t i = 0; i < numOperands - 1; ++i) {
+      ps << "cat(" << PP::ibox0;
+      emitExpression(op->getOperand(i));
+      ps << "," << PP::space;
+    }
+
+    emitExpression(op->getOperand(numOperands - 1));
+    for (size_t i = 0; i < numOperands - 1; ++i)
+      ps << ")" << PP::end;
+    return;
+  }
 }
 
 void Emitter::emitAttribute(MemDirAttr attr) {

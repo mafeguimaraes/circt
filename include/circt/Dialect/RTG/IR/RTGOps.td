@@ -602,7 +602,7 @@ def TupleCreateOp : RTGOp<"tuple_create", [
   let summary = "create a tuple";
 
   let arguments = (ins Variadic<AnyType>:$elements);
-  let results = (outs Builtin_Tuple:$result);
+  let results = (outs TupleType:$result);
 
   let assemblyFormat = [{
     ($elements^ `:` qualified(type($elements)))? attr-dict
@@ -615,7 +615,7 @@ def TupleExtractOp : RTGOp<"tuple_extract", [
 ]> {
   let summary = "get an element from a tuple";
 
-  let arguments = (ins Builtin_Tuple:$tuple, IndexAttr:$index);
+  let arguments = (ins TupleType:$tuple, IndexAttr:$index);
   let results = (outs AnyType:$result);
 
   let assemblyFormat = [{
@@ -629,16 +629,16 @@ def RandomNumberInRangeOp : RTGOp<"random_number_in_range", []> {
   let summary = "returns a number uniformly at random within the given range";
   let description = [{
     This operation computes a random number based on a uniform distribution
-    within the given range. The lower bound is inclusive while the upper bound
-    is exclusive. If the range is empty, compilation will fail.
-    This is (obviously) more performant than inserting all legal numbers into a
-    set and using 'set_select_random', but yields the same behavior.
+    within the given range. Both the lower and upper bounds are inclusive. If
+    the range is empty, compilation will fail. This is (obviously) more
+    performant than inserting all legal numbers into a set and using
+    'set_select_random', but yields the same behavior.
   }];
 
   let arguments = (ins Index:$lowerBound, Index:$upperBound);
   let results = (outs Index:$result);
 
-  let assemblyFormat = "` ` `[` $lowerBound `,` $upperBound `)` attr-dict";
+  let assemblyFormat = "` ` `[` $lowerBound `,` $upperBound `]` attr-dict";
 }
 
 //===- Misc Operations ----------------------------------------------------===//
@@ -727,6 +727,10 @@ def TestOp : RTGOp<"test", [
     The arguments must match the fields of the dict type in the target attribute
     exactly. The test must not have any additional arguments and cannot be
     referenced by an `rtg.get_sequence` operation.
+
+    If the end of the test is reached without executing an `rtg.test.success`
+    or `rtg.test.failure` it is as if an `rtg.test.success` is executed at the
+    very end.
   }];
 
   let arguments = (ins SymbolNameAttr:$sym_name, StrAttr:$templateName,
@@ -736,6 +740,19 @@ def TestOp : RTGOp<"test", [
   let hasCustomAssemblyFormat = 1;
   let hasRegionVerifier = 1;
   let hasVerifier = 1;
+}
+
+def TestSuccessOp : RTGOp<"test.success", []> {
+  let summary = "exit the test and report success";
+
+  let assemblyFormat = "attr-dict";
+}
+
+def TestFailureOp : RTGOp<"test.failure", []> {
+  let summary = "exit the test and report failure";
+
+  let arguments = (ins StrAttr:$errorMessage);
+  let assemblyFormat = "$errorMessage attr-dict";
 }
 
 def TargetOp : RTGOp<"target", [
@@ -776,6 +793,73 @@ def YieldOp : RTGOp<"yield", [Pure, Terminator]> {
   let builders = [OpBuilder<(ins), [{ /* nothing to do */ }]>];
 }
 
+def ValidateOp : RTGOp<"validate", [
+  AllTypesMatch<["defaultValue", "value"]>,
+  AllTypesMatch<["defaultUsedValues", "elseValues", "values"]>,
+  AttrSizedOperandSegments,
+]> {
+  let summary = "validate the value in the given resource";
+  let description = [{
+    Validates the content of a reference-style value from the payload dialect
+    at the position of this operation. This validation may happen in a single
+    lowering step, e.g., a compiler pass that interprets the IR and inlines the
+    interpreted value directly, or a program that can be run to generate the
+    desired values may be generated first and in a second compilation run those
+    values (possibly stored in a file by the first run) may be inlined at the
+    position of these operations. For the latter, the ID attribute may be used
+    to match the values to the right operations and the 'defaultValue' is used
+    by the first run instead of the simulated value.
+
+    If the control-flow of the payload program visits this operation multiple
+    times, a possibly different value may be logged each time. In such
+    situations, the lowering should fail as no single value can be determined
+    that can be hardcoded/inlined in its place.
+
+    The value returned by this operation is not known during elaboration and
+    is thus treated like a value with identity (even though it might just be
+    a simple integer). Therefore, it is strongly recommended to not use the
+    result value of this operation in situations that expect structural
+    equivalence checks such as adding it to sets or bags.
+
+    The 'defaultUsedValues' are forwarded to the 'values' results without any
+    modification whenever the 'defaultValue' is used as replacement for 'value'.
+    Otherwise, the 'elseValues' are forwarded. This can be used to conditionally
+    execute code based on whether the default value was used or a proper value
+    was used as replacement. Note that this is not the most light-weight
+    implementation as, in principle, a single 'i1' result could achieve the same
+    in combination with an 'scf.if' or 'select' operation. However, these
+    operations are fully resolved during elaboration while the 'validate'
+    operation remains until later in the pipeline because the repeated
+    compilation runs to resolve the validate operations should use the same
+    elaboration result which is difficult to achieve with multiple elaboration
+    runs even with the same seed as a different elaboration of the validate op
+    for the different compilation runs can lead to subtle differences in the
+    RNG querrying behavior.
+
+    Another alternative could be a region that is conditionally inlined or
+    deleted. However, this is even more heavy-weight and implies a strategy that
+    involves some instructions to be present in one run but not the other which
+    can lead to different label addresses, etc. and thus more likely to problems
+    with AOT co-simulation.
+  }];
+
+  let arguments = (ins ValidationTypeInterface:$ref,
+                       AnyType:$defaultValue,
+                       OptionalAttr<StrAttr>:$id,
+                       Variadic<AnyType>:$defaultUsedValues,
+                       Variadic<AnyType>:$elseValues);
+  let results = (outs AnyType:$value, Variadic<AnyType>:$values);
+
+  let assemblyFormat = [{
+    $ref `,` $defaultValue (`,` $id^)?
+    (` ``(` $defaultUsedValues^ `else` $elseValues `:`
+    qualified(type($defaultUsedValues)) `)`)? `:`
+    qualified(type($ref)) `->` qualified(type($defaultValue)) attr-dict
+  }];
+
+  let hasVerifier = 1;
+}
+
 //===----------------------------------------------------------------------===//
 // ISA Target Operations
 //===----------------------------------------------------------------------===//
@@ -797,6 +881,46 @@ def IntToImmediateOp : RTGISAOp<"int_to_immediate", [Pure]> {
   let results = (outs ImmediateType:$result);
 
   let assemblyFormat = "$input `:` qualified(type($result)) attr-dict";
+}
+
+def ConcatImmediateOp : RTGISAOp<"concat_immediate", [
+  Pure,
+  DeclareOpInterfaceMethods<InferTypeOpInterface>,
+]> {
+  let summary = "concatenate immediates";
+  let description = [{
+    This operation concatenates a variadic number of immediates into a single
+    immediate. The operands are concatenated in order, with the first operand
+    becoming the most significant bits of the result.
+  }];
+
+  let arguments = (ins Variadic<ImmediateType>:$operands);
+  let results = (outs ImmediateType:$result);
+
+  let assemblyFormat = "$operands `:` qualified(type($operands)) attr-dict";
+
+  let hasFolder = 1;
+}
+
+def SliceImmediateOp : RTGISAOp<"slice_immediate", [Pure]> {
+  let summary = "extract a slice from an immediate";
+  let description = [{
+    This operation extracts a contiguous slice of bits from an immediate value.
+    The slice is specified by a low bit index (inclusive) and the width of the
+    slice is determined by the result type. The slice must fit within the input
+    immediate's width.
+  }];
+
+  let arguments = (ins ImmediateType:$input, I32Attr:$lowBit);
+  let results = (outs ImmediateType:$result);
+
+  let assemblyFormat = [{
+    $input `from` $lowBit `:`
+    qualified(type($input)) `->` qualified(type($result)) attr-dict
+  }];
+  
+  let hasVerifier = 1;
+  let hasFolder = 1;
 }
 
 //===- ISA Memory Block Operations ----------------------------------------===//

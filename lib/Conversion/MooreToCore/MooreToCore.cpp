@@ -15,6 +15,7 @@
 #include "circt/Dialect/Debug/DebugOps.h"
 #include "circt/Dialect/HW/HWOps.h"
 #include "circt/Dialect/LLHD/IR/LLHDOps.h"
+#include "circt/Dialect/LTL/LTLOps.h"
 #include "circt/Dialect/Moore/MooreOps.h"
 #include "circt/Dialect/Sim/SimOps.h"
 #include "circt/Dialect/Verif/VerifOps.h"
@@ -22,6 +23,7 @@
 #include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/BuiltinDialect.h"
 #include "mlir/IR/Iterators.h"
@@ -56,21 +58,21 @@ static Value adjustIntegerWidth(OpBuilder &builder, Value value,
     return value;
 
   if (intWidth < targetWidth) {
-    Value zeroExt = builder.create<hw::ConstantOp>(
-        loc, builder.getIntegerType(targetWidth - intWidth), 0);
-    return builder.create<comb::ConcatOp>(loc, ValueRange{zeroExt, value});
+    Value zeroExt = hw::ConstantOp::create(
+        builder, loc, builder.getIntegerType(targetWidth - intWidth), 0);
+    return comb::ConcatOp::create(builder, loc, ValueRange{zeroExt, value});
   }
 
-  Value hi = builder.create<comb::ExtractOp>(loc, value, targetWidth,
-                                             intWidth - targetWidth);
-  Value zero = builder.create<hw::ConstantOp>(
-      loc, builder.getIntegerType(intWidth - targetWidth), 0);
-  Value isZero = builder.create<comb::ICmpOp>(loc, comb::ICmpPredicate::eq, hi,
-                                              zero, false);
-  Value lo = builder.create<comb::ExtractOp>(loc, value, 0, targetWidth);
-  Value max = builder.create<hw::ConstantOp>(
-      loc, builder.getIntegerType(targetWidth), -1);
-  return builder.create<comb::MuxOp>(loc, isZero, lo, max, false);
+  Value hi = comb::ExtractOp::create(builder, loc, value, targetWidth,
+                                     intWidth - targetWidth);
+  Value zero = hw::ConstantOp::create(
+      builder, loc, builder.getIntegerType(intWidth - targetWidth), 0);
+  Value isZero = comb::ICmpOp::create(builder, loc, comb::ICmpPredicate::eq, hi,
+                                      zero, false);
+  Value lo = comb::ExtractOp::create(builder, loc, value, 0, targetWidth);
+  Value max = hw::ConstantOp::create(builder, loc,
+                                     builder.getIntegerType(targetWidth), -1);
+  return comb::MuxOp::create(builder, loc, isZero, lo, max, false);
 }
 
 /// Get the ModulePortInfo from a SVModuleOp.
@@ -79,14 +81,13 @@ static hw::ModulePortInfo getModulePortInfo(const TypeConverter &typeConverter,
   size_t inputNum = 0;
   size_t resultNum = 0;
   auto moduleTy = op.getModuleType();
-  SmallVector<hw::PortInfo> inputs, outputs;
-  inputs.reserve(moduleTy.getNumInputs());
-  outputs.reserve(moduleTy.getNumOutputs());
+  SmallVector<hw::PortInfo> ports;
+  ports.reserve(moduleTy.getNumPorts());
 
   for (auto port : moduleTy.getPorts()) {
     Type portTy = typeConverter.convertType(port.type);
     if (auto ioTy = dyn_cast_or_null<hw::InOutType>(portTy)) {
-      inputs.push_back(hw::PortInfo(
+      ports.push_back(hw::PortInfo(
           {{port.name, ioTy.getElementType(), hw::ModulePort::InOut},
            inputNum++,
            {}}));
@@ -94,7 +95,7 @@ static hw::ModulePortInfo getModulePortInfo(const TypeConverter &typeConverter,
     }
 
     if (port.dir == hw::ModulePort::Direction::Output) {
-      outputs.push_back(
+      ports.push_back(
           hw::PortInfo({{port.name, portTy, port.dir}, resultNum++, {}}));
     } else {
       // FIXME: Once we support net<...>, ref<...> type to represent type of
@@ -102,12 +103,12 @@ static hw::ModulePortInfo getModulePortInfo(const TypeConverter &typeConverter,
       // port. It can change to generate corresponding types for direction of
       // port or do specified operation to it. Now inout and ref port is treated
       // as input port.
-      inputs.push_back(
+      ports.push_back(
           hw::PortInfo({{port.name, portTy, port.dir}, inputNum++, {}}));
     }
   }
 
-  return hw::ModulePortInfo(inputs, outputs);
+  return hw::ModulePortInfo(ports);
 }
 
 //===----------------------------------------------------------------------===//
@@ -124,8 +125,8 @@ struct SVModuleOpConversion : public OpConversionPattern<SVModuleOp> {
 
     // Create the hw.module to replace moore.module
     auto hwModuleOp =
-        rewriter.create<hw::HWModuleOp>(op.getLoc(), op.getSymNameAttr(),
-                                        getModulePortInfo(*typeConverter, op));
+        hw::HWModuleOp::create(rewriter, op.getLoc(), op.getSymNameAttr(),
+                               getModulePortInfo(*typeConverter, op));
     // Make hw.module have the same visibility as the moore.module.
     // The entry/top level module is public, otherwise is private.
     SymbolTable::setSymbolVisibility(hwModuleOp,
@@ -165,9 +166,9 @@ struct InstanceOpConversion : public OpConversionPattern<InstanceOp> {
 
     // Create the new hw instanceOp to replace the original one.
     rewriter.setInsertionPoint(op);
-    auto instOp = rewriter.create<hw::InstanceOp>(
-        op.getLoc(), op.getResultTypes(), instName, moduleName, op.getInputs(),
-        op.getInputNamesAttr(), op.getOutputNamesAttr(),
+    auto instOp = hw::InstanceOp::create(
+        rewriter, op.getLoc(), op.getResultTypes(), instName, moduleName,
+        op.getInputs(), op.getInputNamesAttr(), op.getOutputNamesAttr(),
         /*Parameter*/ rewriter.getArrayAttr({}), /*InnerSymbol*/ nullptr,
         /*doNotPrint*/ nullptr);
 
@@ -189,7 +190,7 @@ static void getValuesToObserve(Region *region,
   auto probeIfSignal = [&](Value value) -> Value {
     if (!isa<hw::InOutType>(value.getType()))
       return value;
-    return rewriter.create<llhd::PrbOp>(loc, value);
+    return llhd::PrbOp::create(rewriter, loc, value);
   };
 
   region->getParentOp()->walk<WalkOrder::PreOrder, ForwardDominanceIterator<>>(
@@ -248,9 +249,9 @@ struct ProcedureOpConversion : public OpConversionPattern<ProcedureOp> {
         op.getKind() == ProcedureKind::Final) {
       Operation *newOp;
       if (op.getKind() == ProcedureKind::Initial)
-        newOp = rewriter.create<llhd::ProcessOp>(loc, TypeRange{});
+        newOp = llhd::ProcessOp::create(rewriter, loc, TypeRange{});
       else
-        newOp = rewriter.create<llhd::FinalOp>(loc);
+        newOp = llhd::FinalOp::create(rewriter, loc);
       auto &body = newOp->getRegion(0);
       rewriter.inlineRegionBefore(op.getBody(), body, body.end());
       for (auto returnOp :
@@ -263,14 +264,14 @@ struct ProcedureOpConversion : public OpConversionPattern<ProcedureOp> {
     }
 
     // All other procedures lower to a an `llhd.process`.
-    auto newOp = rewriter.create<llhd::ProcessOp>(loc, TypeRange{});
+    auto newOp = llhd::ProcessOp::create(rewriter, loc, TypeRange{});
 
     // We need to add an empty entry block because it is not allowed in MLIR to
     // branch back to the entry block. Instead we put the logic in the second
     // block and branch to that.
     rewriter.createBlock(&newOp.getBody());
     auto *block = &op.getBody().front();
-    rewriter.create<cf::BranchOp>(loc, block);
+    cf::BranchOp::create(rewriter, loc, block);
     rewriter.inlineRegionBefore(op.getBody(), newOp.getBody(),
                                 newOp.getBody().end());
 
@@ -283,8 +284,8 @@ struct ProcedureOpConversion : public OpConversionPattern<ProcedureOp> {
     if (op.getKind() == ProcedureKind::AlwaysComb ||
         op.getKind() == ProcedureKind::AlwaysLatch) {
       Block *waitBlock = rewriter.createBlock(&newOp.getBody());
-      rewriter.create<llhd::WaitOp>(loc, ValueRange{}, Value(), observedValues,
-                                    ValueRange{}, block);
+      llhd::WaitOp::create(rewriter, loc, ValueRange{}, Value(), observedValues,
+                           ValueRange{}, block);
       block = waitBlock;
     }
 
@@ -293,7 +294,7 @@ struct ProcedureOpConversion : public OpConversionPattern<ProcedureOp> {
     // `always_latch` procedures.
     for (auto returnOp : llvm::make_early_inc_range(newOp.getOps<ReturnOp>())) {
       rewriter.setInsertionPoint(returnOp);
-      rewriter.create<cf::BranchOp>(loc, block);
+      cf::BranchOp::create(rewriter, loc, block);
       rewriter.eraseOp(returnOp);
     }
 
@@ -359,7 +360,7 @@ struct WaitEventOpConversion : public OpConversionPattern<WaitEventOp> {
 
     auto loc = op.getLoc();
     rewriter.setInsertionPoint(op);
-    rewriter.create<cf::BranchOp>(loc, waitBlock);
+    cf::BranchOp::create(rewriter, loc, waitBlock);
 
     // We need to inline two copies of the `wait_event`'s body region: one is
     // used to determine the values going into `detect_event` ops before the
@@ -398,8 +399,8 @@ struct WaitEventOpConversion : public OpConversionPattern<WaitEventOp> {
     // Create the `llhd.wait` op that suspends the current process and waits for
     // a change in the interesting values listed in `observeValues`. When a
     // change is detected, execution resumes in the "check" block.
-    auto waitOp = rewriter.create<llhd::WaitOp>(
-        loc, ValueRange{}, Value(), observeValues, ValueRange{}, checkBlock);
+    auto waitOp = llhd::WaitOp::create(rewriter, loc, ValueRange{}, Value(),
+                                       observeValues, ValueRange{}, checkBlock);
     rewriter.inlineBlockBefore(&clonedOp.getBody().front(), waitOp);
     rewriter.eraseOp(clonedOp);
 
@@ -424,8 +425,8 @@ struct WaitEventOpConversion : public OpConversionPattern<WaitEventOp> {
         beforeType =
             IntType::get(rewriter.getContext(), 1, beforeType.getDomain());
         before =
-            rewriter.create<moore::ExtractOp>(loc, beforeType, before, LSB);
-        after = rewriter.create<moore::ExtractOp>(loc, beforeType, after, LSB);
+            moore::ExtractOp::create(rewriter, loc, beforeType, before, LSB);
+        after = moore::ExtractOp::create(rewriter, loc, beforeType, after, LSB);
       }
 
       auto intType = rewriter.getIntegerType(beforeType.getWidth());
@@ -435,25 +436,25 @@ struct WaitEventOpConversion : public OpConversionPattern<WaitEventOp> {
                                                          after);
 
       if (edge == Edge::AnyChange)
-        return rewriter.create<comb::ICmpOp>(loc, ICmpPredicate::ne, before,
-                                             after, true);
+        return comb::ICmpOp::create(rewriter, loc, ICmpPredicate::ne, before,
+                                    after, true);
 
       SmallVector<Value> disjuncts;
-      Value trueVal = rewriter.create<hw::ConstantOp>(loc, APInt(1, 1));
+      Value trueVal = hw::ConstantOp::create(rewriter, loc, APInt(1, 1));
 
       if (edge == Edge::PosEdge || edge == Edge::BothEdges) {
         Value notOldVal =
-            rewriter.create<comb::XorOp>(loc, before, trueVal, true);
+            comb::XorOp::create(rewriter, loc, before, trueVal, true);
         Value posedge =
-            rewriter.create<comb::AndOp>(loc, notOldVal, after, true);
+            comb::AndOp::create(rewriter, loc, notOldVal, after, true);
         disjuncts.push_back(posedge);
       }
 
       if (edge == Edge::NegEdge || edge == Edge::BothEdges) {
         Value notCurrVal =
-            rewriter.create<comb::XorOp>(loc, after, trueVal, true);
+            comb::XorOp::create(rewriter, loc, after, trueVal, true);
         Value posedge =
-            rewriter.create<comb::AndOp>(loc, before, notCurrVal, true);
+            comb::AndOp::create(rewriter, loc, before, notCurrVal, true);
         disjuncts.push_back(posedge);
       }
 
@@ -476,7 +477,8 @@ struct WaitEventOpConversion : public OpConversionPattern<WaitEventOp> {
         if (detectOp.getCondition()) {
           auto condition = typeConverter->materializeTargetConversion(
               rewriter, loc, rewriter.getI1Type(), detectOp.getCondition());
-          trigger = rewriter.create<comb::AndOp>(loc, trigger, condition, true);
+          trigger =
+              comb::AndOp::create(rewriter, loc, trigger, condition, true);
         }
         triggers.push_back(trigger);
       }
@@ -490,14 +492,15 @@ struct WaitEventOpConversion : public OpConversionPattern<WaitEventOp> {
       // block. If there are no detect_event operations in the wait event, the
       // 'llhd.wait' operation will not have any observed values and thus the
       // process will hang there forever.
-      rewriter.create<cf::BranchOp>(loc, resumeBlock);
+      cf::BranchOp::create(rewriter, loc, resumeBlock);
     } else {
       // If any `detect_event` op detected an event, branch to the "resume"
       // block which contains any code after the `wait_event` op. If no events
       // were detected, branch back to the "wait" block to wait for the next
       // change on the interesting signals.
       auto triggered = rewriter.createOrFold<comb::OrOp>(loc, triggers, true);
-      rewriter.create<cf::CondBranchOp>(loc, triggered, resumeBlock, waitBlock);
+      cf::CondBranchOp::create(rewriter, loc, triggered, resumeBlock,
+                               waitBlock);
     }
 
     return success();
@@ -530,7 +533,7 @@ struct VariableOpConversion : public OpConversionPattern<VariableOp> {
       // TODO: Once the core dialects support four-valued integers, this code
       // will additionally need to generate an all-X value for four-valued
       // variables.
-      Value constZero = rewriter.create<hw::ConstantOp>(loc, APInt(width, 0));
+      Value constZero = hw::ConstantOp::create(rewriter, loc, APInt(width, 0));
       init = rewriter.createOrFold<hw::BitcastOp>(loc, elementType, constZero);
     }
 
@@ -560,7 +563,7 @@ struct NetOpConversion : public OpConversionPattern<NetOp> {
     int64_t width = hw::getBitWidth(elementType);
     if (width == -1)
       return failure();
-    auto constZero = rewriter.create<hw::ConstantOp>(loc, APInt(width, 0));
+    auto constZero = hw::ConstantOp::create(rewriter, loc, APInt(width, 0));
     auto init =
         rewriter.createOrFold<hw::BitcastOp>(loc, elementType, constZero);
 
@@ -570,8 +573,8 @@ struct NetOpConversion : public OpConversionPattern<NetOp> {
     if (auto assignedValue = adaptor.getAssignment()) {
       auto timeAttr = llhd::TimeAttr::get(resultType.getContext(), 0U,
                                           llvm::StringRef("ns"), 0, 1);
-      auto time = rewriter.create<llhd::ConstantTimeOp>(loc, timeAttr);
-      rewriter.create<llhd::DrvOp>(loc, signal, assignedValue, time, Value{});
+      auto time = llhd::ConstantTimeOp::create(rewriter, loc, timeAttr);
+      llhd::DrvOp::create(rewriter, loc, signal, assignedValue, time, Value{});
     }
 
     return success();
@@ -602,23 +605,23 @@ struct StringConstantOpConv : public OpConversionPattern<StringConstantOp> {
   LogicalResult
   matchAndRewrite(moore::StringConstantOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    const auto str = op.getValue();
-    const unsigned byteWidth = str.size() * 8;
     const auto resultType =
         typeConverter->convertType(op.getResult().getType());
-    if (const auto intType = mlir::dyn_cast<IntegerType>(resultType)) {
-      if (intType.getWidth() < byteWidth) {
-        return rewriter.notifyMatchFailure(op,
-                                           "invalid string constant type size");
-      }
-    } else {
-      return rewriter.notifyMatchFailure(op, "invalid string constant type");
-    }
+    const auto intType = mlir::cast<IntegerType>(resultType);
+
+    const auto str = op.getValue();
+    const unsigned byteWidth = intType.getWidth();
     APInt value(byteWidth, 0);
-    for (size_t i = 0; i < str.size(); ++i) {
-      const auto asciiChar = static_cast<uint8_t>(str[i]);
-      value |= APInt(byteWidth, asciiChar) << (8 * (str.size() - 1 - i));
+
+    // Pack ascii chars from the end of the string, until it fits.
+    const size_t maxChars =
+        std::min(str.size(), static_cast<size_t>(byteWidth / 8));
+    for (size_t i = 0; i < maxChars; i++) {
+      const size_t pos = str.size() - 1 - i;
+      const auto asciiChar = static_cast<uint8_t>(str[pos]);
+      value |= APInt(byteWidth, asciiChar) << (8 * i);
     }
+
     rewriter.replaceOpWithNewOp<hw::ConstantOp>(
         op, resultType, rewriter.getIntegerAttr(resultType, value));
     return success();
@@ -667,8 +670,8 @@ struct ExtractOpConversion : public OpConversionPattern<ExtractOp> {
 
       SmallVector<Value> toConcat;
       if (low < 0)
-        toConcat.push_back(rewriter.create<hw::ConstantOp>(
-            op.getLoc(), APInt(std::min(-low, resultWidth), 0)));
+        toConcat.push_back(hw::ConstantOp::create(
+            rewriter, op.getLoc(), APInt(std::min(-low, resultWidth), 0)));
 
       if (low < inputWidth && high > 0) {
         int32_t lowIdx = std::max(low, 0);
@@ -683,7 +686,7 @@ struct ExtractOpConversion : public OpConversionPattern<ExtractOp> {
       int32_t diff = high - inputWidth;
       if (diff > 0) {
         Value val =
-            rewriter.create<hw::ConstantOp>(op.getLoc(), APInt(diff, 0));
+            hw::ConstantOp::create(rewriter, op.getLoc(), APInt(diff, 0));
         toConcat.push_back(val);
       }
 
@@ -707,8 +710,8 @@ struct ExtractOpConversion : public OpConversionPattern<ExtractOp> {
 
         SmallVector<Value> toConcat;
         if (low < 0) {
-          Value val = rewriter.create<hw::ConstantOp>(
-              op.getLoc(),
+          Value val = hw::ConstantOp::create(
+              rewriter, op.getLoc(),
               APInt(std::min((-low) * elementWidth, resWidth * elementWidth),
                     0));
           Value res = rewriter.createOrFold<hw::BitcastOp>(
@@ -719,8 +722,8 @@ struct ExtractOpConversion : public OpConversionPattern<ExtractOp> {
 
         if (low < inputWidth && high > 0) {
           int32_t lowIdx = std::max(0, low);
-          Value lowIdxVal = rewriter.create<hw::ConstantOp>(
-              op.getLoc(), rewriter.getIntegerType(width), lowIdx);
+          Value lowIdxVal = hw::ConstantOp::create(
+              rewriter, op.getLoc(), rewriter.getIntegerType(width), lowIdx);
           Value middle = rewriter.createOrFold<hw::ArraySliceOp>(
               op.getLoc(),
               hw::ArrayType::get(
@@ -732,11 +735,11 @@ struct ExtractOpConversion : public OpConversionPattern<ExtractOp> {
 
         int32_t diff = high - inputWidth;
         if (diff > 0) {
-          Value constZero = rewriter.create<hw::ConstantOp>(
-              op.getLoc(), APInt(diff * elementWidth, 0));
-          Value val = rewriter.create<hw::BitcastOp>(
-              op.getLoc(), hw::ArrayType::get(arrTy.getElementType(), diff),
-              constZero);
+          Value constZero = hw::ConstantOp::create(
+              rewriter, op.getLoc(), APInt(diff * elementWidth, 0));
+          Value val = hw::BitcastOp::create(
+              rewriter, op.getLoc(),
+              hw::ArrayType::get(arrTy.getElementType(), diff), constZero);
           toConcat.push_back(val);
         }
 
@@ -752,15 +755,16 @@ struct ExtractOpConversion : public OpConversionPattern<ExtractOp> {
         if (bw < 0)
           return failure();
 
-        Value val = rewriter.create<hw::ConstantOp>(op.getLoc(), APInt(bw, 0));
+        Value val = hw::ConstantOp::create(rewriter, op.getLoc(), APInt(bw, 0));
         Value bitcast =
             rewriter.createOrFold<hw::BitcastOp>(op.getLoc(), resultType, val);
         rewriter.replaceOp(op, bitcast);
         return success();
       }
 
-      Value idx = rewriter.create<hw::ConstantOp>(
-          op.getLoc(), rewriter.getIntegerType(width), adaptor.getLowBit());
+      Value idx = hw::ConstantOp::create(rewriter, op.getLoc(),
+                                         rewriter.getIntegerType(width),
+                                         adaptor.getLowBit());
       rewriter.replaceOpWithNewOp<hw::ArrayGetOp>(op, adaptor.getInput(), idx);
       return success();
     }
@@ -785,8 +789,9 @@ struct ExtractRefOpConversion : public OpConversionPattern<ExtractRefOp> {
       if (width == -1)
         return failure();
 
-      Value lowBit = rewriter.create<hw::ConstantOp>(
-          op.getLoc(), rewriter.getIntegerType(llvm::Log2_64_Ceil(width)),
+      Value lowBit = hw::ConstantOp::create(
+          rewriter, op.getLoc(),
+          rewriter.getIntegerType(llvm::Log2_64_Ceil(width)),
           adaptor.getLowBit());
       rewriter.replaceOpWithNewOp<llhd::SigExtractOp>(
           op, resultType, adaptor.getInput(), lowBit);
@@ -794,8 +799,8 @@ struct ExtractRefOpConversion : public OpConversionPattern<ExtractRefOp> {
     }
 
     if (auto arrType = dyn_cast<hw::ArrayType>(inputType)) {
-      Value lowBit = rewriter.create<hw::ConstantOp>(
-          op.getLoc(),
+      Value lowBit = hw::ConstantOp::create(
+          rewriter, op.getLoc(),
           rewriter.getIntegerType(llvm::Log2_64_Ceil(arrType.getNumElements())),
           adaptor.getLowBit());
 
@@ -827,8 +832,8 @@ struct DynExtractOpConversion : public OpConversionPattern<DynExtractOp> {
     if (auto intType = dyn_cast<IntegerType>(inputType)) {
       Value amount = adjustIntegerWidth(rewriter, adaptor.getLowBit(),
                                         intType.getWidth(), op->getLoc());
-      Value value = rewriter.create<comb::ShrUOp>(op->getLoc(),
-                                                  adaptor.getInput(), amount);
+      Value value = comb::ShrUOp::create(rewriter, op->getLoc(),
+                                         adaptor.getInput(), amount);
 
       rewriter.replaceOpWithNewOp<comb::ExtractOp>(op, resultType, value, 0);
       return success();
@@ -955,7 +960,7 @@ struct ReduceAndOpConversion : public OpConversionPattern<ReduceAndOp> {
   matchAndRewrite(ReduceAndOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     Type resultType = typeConverter->convertType(op.getInput().getType());
-    Value max = rewriter.create<hw::ConstantOp>(op->getLoc(), resultType, -1);
+    Value max = hw::ConstantOp::create(rewriter, op->getLoc(), resultType, -1);
 
     rewriter.replaceOpWithNewOp<comb::ICmpOp>(op, comb::ICmpPredicate::eq,
                                               adaptor.getInput(), max);
@@ -969,7 +974,7 @@ struct ReduceOrOpConversion : public OpConversionPattern<ReduceOrOp> {
   matchAndRewrite(ReduceOrOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     Type resultType = typeConverter->convertType(op.getInput().getType());
-    Value zero = rewriter.create<hw::ConstantOp>(op->getLoc(), resultType, 0);
+    Value zero = hw::ConstantOp::create(rewriter, op->getLoc(), resultType, 0);
 
     rewriter.replaceOpWithNewOp<comb::ICmpOp>(op, comb::ICmpPredicate::ne,
                                               adaptor.getInput(), zero);
@@ -995,7 +1000,8 @@ struct BoolCastOpConversion : public OpConversionPattern<BoolCastOp> {
                   ConversionPatternRewriter &rewriter) const override {
     Type resultType = typeConverter->convertType(op.getInput().getType());
     if (isa_and_nonnull<IntegerType>(resultType)) {
-      Value zero = rewriter.create<hw::ConstantOp>(op->getLoc(), resultType, 0);
+      Value zero =
+          hw::ConstantOp::create(rewriter, op->getLoc(), resultType, 0);
       rewriter.replaceOpWithNewOp<comb::ICmpOp>(op, comb::ICmpPredicate::ne,
                                                 adaptor.getInput(), zero);
       return success();
@@ -1011,7 +1017,7 @@ struct NotOpConversion : public OpConversionPattern<NotOp> {
                   ConversionPatternRewriter &rewriter) const override {
     Type resultType =
         ConversionPattern::typeConverter->convertType(op.getResult().getType());
-    Value max = rewriter.create<hw::ConstantOp>(op.getLoc(), resultType, -1);
+    Value max = hw::ConstantOp::create(rewriter, op.getLoc(), resultType, -1);
 
     rewriter.replaceOpWithNewOp<comb::XorOp>(op, adaptor.getInput(), max);
     return success();
@@ -1025,7 +1031,7 @@ struct NegOpConversion : public OpConversionPattern<NegOp> {
                   ConversionPatternRewriter &rewriter) const override {
     Type resultType =
         ConversionPattern::typeConverter->convertType(op.getResult().getType());
-    Value zero = rewriter.create<hw::ConstantOp>(op.getLoc(), resultType, 0);
+    Value zero = hw::ConstantOp::create(rewriter, op.getLoc(), resultType, 0);
 
     rewriter.replaceOpWithNewOp<comb::SubOp>(op, zero, adaptor.getInput());
     return success();
@@ -1097,7 +1103,7 @@ struct CaseXZEqOpConversion : public OpConversionPattern<SourceOp> {
     Value rhs = adaptor.getRhs();
     if (!ignoredBits.isZero()) {
       ignoredBits.flipAllBits();
-      auto maskOp = rewriter.create<hw::ConstantOp>(op.getLoc(), ignoredBits);
+      auto maskOp = hw::ConstantOp::create(rewriter, op.getLoc(), ignoredBits);
       lhs = rewriter.createOrFold<comb::AndOp>(op.getLoc(), lhs, maskOp);
       rhs = rewriter.createOrFold<comb::AndOp>(op.getLoc(), rhs, maskOp);
     }
@@ -1156,8 +1162,9 @@ struct ZExtOpConversion : public OpConversionPattern<ZExtOp> {
     auto targetWidth = op.getType().getWidth();
     auto inputWidth = op.getInput().getType().getWidth();
 
-    auto zeroExt = rewriter.create<hw::ConstantOp>(
-        op.getLoc(), rewriter.getIntegerType(targetWidth - inputWidth), 0);
+    auto zeroExt = hw::ConstantOp::create(
+        rewriter, op.getLoc(),
+        rewriter.getIntegerType(targetWidth - inputWidth), 0);
 
     rewriter.replaceOpWithNewOp<comb::ConcatOp>(
         op, ValueRange{zeroExt, adaptor.getInput()});
@@ -1222,7 +1229,8 @@ struct CondBranchOpConversion : public OpConversionPattern<cf::CondBranchOp> {
                   ConversionPatternRewriter &rewriter) const override {
     rewriter.replaceOpWithNewOp<cf::CondBranchOp>(
         op, adaptor.getCondition(), adaptor.getTrueDestOperands(),
-        adaptor.getFalseDestOperands(), op.getTrueDest(), op.getFalseDest());
+        adaptor.getFalseDestOperands(), /*branch_weights=*/nullptr,
+        op.getTrueDest(), op.getFalseDest());
     return success();
   }
 };
@@ -1322,29 +1330,18 @@ struct PowUOpConversion : public OpConversionPattern<PowUOp> {
                   ConversionPatternRewriter &rewriter) const override {
     Type resultType = typeConverter->convertType(op.getResult().getType());
 
-    Location loc = op.getLoc();
-    auto intType = cast<IntType>(op.getRhs().getType());
+    Location loc = op->getLoc();
 
-    // transform a ** b into scf.for 0 to b step 1 { init *= a }, init = 1
-    Type integerType = rewriter.getIntegerType(intType.getWidth());
-    Value lowerBound = rewriter.create<hw::ConstantOp>(loc, integerType, 0);
-    Value upperBound =
-        rewriter.create<ConversionOp>(loc, integerType, op.getRhs());
-    Value step = rewriter.create<hw::ConstantOp>(loc, integerType, 1);
+    Value zeroVal = hw::ConstantOp::create(rewriter, loc, APInt(1, 0));
+    // zero extend both LHS & RHS to ensure the unsigned integers are
+    // interpreted correctly when calculating power
+    auto lhs = comb::ConcatOp::create(rewriter, loc, zeroVal, adaptor.getLhs());
+    auto rhs = comb::ConcatOp::create(rewriter, loc, zeroVal, adaptor.getRhs());
 
-    Value initVal = rewriter.create<hw::ConstantOp>(loc, resultType, 1);
-    Value lhsVal = rewriter.create<ConversionOp>(loc, resultType, op.getLhs());
+    // lower the exponentiation via MLIR's math dialect
+    auto pow = mlir::math::IPowIOp::create(rewriter, loc, lhs, rhs);
 
-    auto forOp = rewriter.create<scf::ForOp>(
-        loc, lowerBound, upperBound, step, ValueRange(initVal),
-        [&](OpBuilder &builder, Location loc, Value i, ValueRange iterArgs) {
-          Value loopVar = iterArgs.front();
-          Value mul = rewriter.create<comb::MulOp>(loc, lhsVal, loopVar);
-          rewriter.create<scf::YieldOp>(loc, ValueRange(mul));
-        });
-
-    rewriter.replaceOp(op, forOp.getResult(0));
-
+    rewriter.replaceOpWithNewOp<comb::ExtractOp>(op, resultType, pow, 0);
     return success();
   }
 };
@@ -1357,37 +1354,10 @@ struct PowSOpConversion : public OpConversionPattern<PowSOp> {
                   ConversionPatternRewriter &rewriter) const override {
     Type resultType = typeConverter->convertType(op.getResult().getType());
 
-    Location loc = op.getLoc();
-    auto intType = cast<IntType>(op.getRhs().getType());
-    // transform a ** b into scf.for 0 to b step 1 { init *= a }, init = 1
-    Type integerType = rewriter.getIntegerType(intType.getWidth());
-    Value lhsVal = rewriter.create<ConversionOp>(loc, resultType, op.getLhs());
-    Value rhsVal = rewriter.create<ConversionOp>(loc, integerType, op.getRhs());
-    Value constZero = rewriter.create<hw::ConstantOp>(loc, integerType, 0);
-    Value constZeroResult = rewriter.create<hw::ConstantOp>(loc, resultType, 0);
-    Value isNegative = rewriter.create<comb::ICmpOp>(loc, ICmpPredicate::slt,
-                                                     rhsVal, constZero);
-
-    // if the exponent is negative, return 0
-    lhsVal =
-        rewriter.create<comb::MuxOp>(loc, isNegative, constZeroResult, lhsVal);
-    Value upperBound =
-        rewriter.create<comb::MuxOp>(loc, isNegative, constZero, rhsVal);
-
-    Value lowerBound = constZero;
-    Value step = rewriter.create<hw::ConstantOp>(loc, integerType, 1);
-    Value initVal = rewriter.create<hw::ConstantOp>(loc, resultType, 1);
-
-    auto forOp = rewriter.create<scf::ForOp>(
-        loc, lowerBound, upperBound, step, ValueRange(initVal),
-        [&](OpBuilder &builder, Location loc, Value i, ValueRange iterArgs) {
-          auto loopVar = iterArgs.front();
-          auto mul = rewriter.create<comb::MulOp>(loc, lhsVal, loopVar);
-          rewriter.create<scf::YieldOp>(loc, ValueRange(mul));
-        });
-
-    rewriter.replaceOp(op, forOp.getResult(0));
-
+    // utilize MLIR math dialect's math.ipowi to handle the exponentiation of
+    // expression
+    rewriter.replaceOpWithNewOp<mlir::math::IPowIOp>(
+        op, resultType, adaptor.getLhs(), adaptor.getRhs());
     return success();
   }
 };
@@ -1446,7 +1416,7 @@ struct AssignOpConversion : public OpConversionPattern<OpTy> {
     // this conversion.
     auto timeAttr = llhd::TimeAttr::get(
         op->getContext(), 0U, llvm::StringRef("ns"), DeltaTime, EpsilonTime);
-    auto time = rewriter.create<llhd::ConstantTimeOp>(op->getLoc(), timeAttr);
+    auto time = llhd::ConstantTimeOp::create(rewriter, op->getLoc(), timeAttr);
     rewriter.replaceOpWithNewOp<llhd::DrvOp>(op, adaptor.getDst(),
                                              adaptor.getSrc(), time, Value{});
     return success();
@@ -1502,7 +1472,7 @@ struct ConditionalOpConversion : public OpConversionPattern<ConditionalOp> {
     }
 
     auto ifOp =
-        rewriter.create<scf::IfOp>(op.getLoc(), type, adaptor.getCondition());
+        scf::IfOp::create(rewriter, op.getLoc(), type, adaptor.getCondition());
     rewriter.inlineRegionBefore(op.getTrueRegion(), ifOp.getThenRegion(),
                                 ifOp.getThenRegion().end());
     rewriter.inlineRegionBefore(op.getFalseRegion(), ifOp.getElseRegion(),
@@ -1630,7 +1600,9 @@ static void populateLegality(ConversionTarget &target,
   target.addLegalDialect<comb::CombDialect>();
   target.addLegalDialect<hw::HWDialect>();
   target.addLegalDialect<llhd::LLHDDialect>();
+  target.addLegalDialect<ltl::LTLDialect>();
   target.addLegalDialect<mlir::BuiltinDialect>();
+  target.addLegalDialect<mlir::math::MathDialect>();
   target.addLegalDialect<sim::SimDialect>();
   target.addLegalDialect<verif::VerifDialect>();
 
@@ -1757,8 +1729,8 @@ static void populateTypeConversion(TypeConverter &typeConverter) {
           mlir::ValueRange inputs, mlir::Location loc) -> mlir::Value {
         if (inputs.size() != 1 || !inputs[0])
           return Value();
-        return builder
-            .create<UnrealizedConversionCastOp>(loc, resultType, inputs[0])
+        return UnrealizedConversionCastOp::create(builder, loc, resultType,
+                                                  inputs[0])
             .getResult(0);
       });
 
@@ -1767,8 +1739,8 @@ static void populateTypeConversion(TypeConverter &typeConverter) {
           mlir::ValueRange inputs, mlir::Location loc) -> mlir::Value {
         if (inputs.size() != 1)
           return Value();
-        return builder
-            .create<UnrealizedConversionCastOp>(loc, resultType, inputs[0])
+        return UnrealizedConversionCastOp::create(builder, loc, resultType,
+                                                  inputs[0])
             ->getResult(0);
       });
 }

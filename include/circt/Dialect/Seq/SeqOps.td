@@ -239,7 +239,6 @@ def FirRegOp : SeqOp<"firreg",
   );
   let results = (outs AnyType:$data);
 
-  let skipDefaultBuilders = 1;
   let hasCanonicalizeMethod = true;
   let hasFolder = true;
   let builders = [
@@ -754,7 +753,7 @@ def YieldOp : SeqOp<"yield",
 
   let arguments = (ins Variadic<AnyType>:$operands);
   let builders = [
-    OpBuilder<(ins), "build($_builder, $_state, std::nullopt);">
+    OpBuilder<(ins), "build($_builder, $_state, mlir::ValueRange());">
   ];
 
   let assemblyFormat = "attr-dict ($operands^ `:` type($operands))?";

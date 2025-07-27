@@ -130,7 +130,7 @@ public:
       if (inputs.size() != 1)
         return Value();
 
-      return builder.create<hw::BitcastOp>(loc, resultType, inputs[0])
+      return hw::BitcastOp::create(builder, loc, resultType, inputs[0])
           ->getResult(0);
     });
 
@@ -140,7 +140,7 @@ public:
       if (inputs.size() != 1)
         return Value();
 
-      return builder.create<hw::BitcastOp>(loc, resultType, inputs[0])
+      return hw::BitcastOp::create(builder, loc, resultType, inputs[0])
           ->getResult(0);
     });
   }
@@ -180,8 +180,4 @@ void HWAggregateToCombPass::runOnOperation() {
   if (failed(mlir::applyPartialConversion(getOperation(), target,
                                           std::move(patterns))))
     return signalPassFailure();
-}
-
-std::unique_ptr<Pass> circt::hw::createHWAggregateToCombPass() {
-  return std::make_unique<HWAggregateToCombPass>();
 }

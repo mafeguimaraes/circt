@@ -425,6 +425,26 @@ moore.module private @SubModule_0(in %a : !moore.l1, in %b : !moore.l1, out c : 
   moore.output %0 : !moore.l1
 }
 
+// CHECK-LABEL: hw.module @PreservePortOrderTop(
+// CHECK-SAME:    out a : i42,
+// CHECK-SAME:    in %b : i42
+// CHECK-SAME:  ) {
+moore.module @PreservePortOrderTop(out a: !moore.i42, in %b: !moore.i42) {
+  // CHECK: [[TMP:%.+]] = hw.instance "inst" @PreservePortOrder(x: %b: i42, z: %b: i42) -> (y: i42)
+  // CHECK: hw.output [[TMP]] : i42
+  %0 = moore.instance "inst" @PreservePortOrder(x: %b: !moore.i42, z: %b: !moore.i42) -> (y: !moore.i42)
+  moore.output %0 : !moore.i42
+}
+
+// CHECK-LABEL: hw.module private @PreservePortOrder(
+// CHECK-SAME:    in %x : i42,
+// CHECK-SAME:    out y : i42,
+// CHECK-SAME:    in %z : i42
+// CHECK-SAME:  ) {
+moore.module private @PreservePortOrder(in %x: !moore.i42, out y: !moore.i42, in %z: !moore.i42) {
+  moore.output %x : !moore.i42
+}
+
 // CHECK-LABEL: hw.module @Variable
 moore.module @Variable() {
   // CHECK: [[TMP0:%.+]] = hw.constant 0 : i32
@@ -1047,8 +1067,18 @@ moore.module @StringConstant() {
   moore.procedure initial {
     // CHECK: hw.constant 1415934836 : i32
     %str = moore.string_constant "Test" : i32
+    // CHECK: hw.constant 1415934836 : i36
+    %str1 = moore.string_constant "Test" : i36
+    // CHECK: hw.constant 116 : i8
+    %str2 = moore.string_constant "Test" : i8
+    // CHECK: hw.constant 0 : i7
+    %str_trunc = moore.string_constant "Test" : i7
+    // CHECK: hw.constant 29556 : i17
+    %str_trunc1 = moore.string_constant "Test" : i17
     // CHECK: hw.constant 0 : i0
     %str_empty = moore.string_constant "" : i0
+    // CHECK: hw.constant 0 : i8
+    %str_empty_zext = moore.string_constant "" : i8
     moore.return
   }
 }
@@ -1111,22 +1141,18 @@ func.func @Conversions(%arg0: !moore.i16, %arg1: !moore.l16) {
 
 // CHECK-LABEL: func.func @PowUOp
 func.func @PowUOp(%arg0: !moore.l32, %arg1: !moore.l32) {
-  // CHECK: %{{.*}} = scf.for %{{.*}} = %{{.*}} to %arg1 step %{{.*}} iter_args([[VAR:%.+]] = %{{.*}}) -> (i32)  : i32 {
-  // CHECK: [[MUL:%.+]] = comb.mul %arg0, [[VAR]] : i32
-  // CHECK: scf.yield [[MUL]] : i32
+  // CHECK: %[[ZEROVAL:.*]] = hw.constant false
+  // CHECK: %[[CONCATA:.*]] = comb.concat %[[ZEROVAL]], %arg0 : i1, i32
+  // CHECK: %[[CONCATB:.*]] = comb.concat %[[ZEROVAL]], %arg1 : i1, i32
+  // CHECK: %[[RES:.*]] = math.ipowi %[[CONCATA]], %[[CONCATB]] : i33
+  // CHECK: comb.extract %[[RES]] from 0 : (i33) -> i32
   %0 = moore.powu %arg0, %arg1 : l32
   return
 }
 
 // CHECK-LABEL: func.func @PowSOp
 func.func @PowSOp(%arg0: !moore.i32, %arg1: !moore.i32) {
-  // CHECK: [[COND:%.+]] = comb.icmp slt %arg1, %{{.*}} : i32
-  // CHECK: [[BASE:%.+]] = comb.mux [[COND]], %{{.*}}, %arg0 : i32
-  // CHECK: [[EXP:%.+]] = comb.mux [[COND]], %{{.*}}, %arg1 : i32
-
-  // CHECK: %{{.*}} = scf.for %{{.*}} = %{{.*}} to [[EXP]] step %{{.*}} iter_args([[VAR:%.+]] = %{{.*}}) -> (i32)  : i32 {
-  // CHECK: [[MUL:%.+]] = comb.mul [[BASE]], [[VAR]] : i32
-  // CHECK: scf.yield [[MUL]] : i32
+  // CHECK: %[[RES:.*]] = math.ipowi %arg0, %arg1 : i32
   %0 = moore.pows %arg0, %arg1 : i32
   return
 }
@@ -1149,15 +1175,9 @@ moore.module @blockArgAsObservedValue(in %in0: !moore.i32, in %in1: !moore.i32) 
   // CHECK: [[PRB:%.+]] = llhd.prb %var : !hw.inout<i32>
   // CHECK: llhd.process
   moore.procedure always_comb {
-    // CHECK: ^bb1:  // 2 preds: ^bb0, ^bb5
-      // CHECK: [[COND:%.+]] = comb.icmp slt %in1, %{{.*}} : i32
-      // CHECK: comb.mux [[COND]], %{{.*}}, %in0 : i32
-      // CHECK: comb.mux [[COND]], %{{.*}}, %in1 : i32
-    %0 = moore.pows %in0, %in1 : !moore.i32
-    moore.blocking_assign %var, %0 : !moore.i32
-    
-    // CHECK: ^bb5:  // pred: ^bb4
-    // CHECK:   llhd.wait (%in0, %in1, [[PRB]] : i32, i32, i32), ^bb1
-    moore.return
+      %0 = moore.add %in0, %in1 : !moore.i32
+      moore.blocking_assign %var, %0 : !moore.i32
+      // CHECK:   llhd.wait (%in0, %in1, [[PRB]] : i32, i32, i32), ^bb1
+      moore.return
   }
 }

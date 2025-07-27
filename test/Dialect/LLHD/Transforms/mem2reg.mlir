@@ -18,6 +18,20 @@ hw.module @Trivial(in %u: i42) {
     // CHECK-NEXT: llhd.halt
     llhd.halt
   }
+  // CHECK: llhd.combinational -> i42
+  llhd.combinational -> i42 {
+    // CHECK-NOT: llhd.drv
+    %0 = llhd.constant_time <0ns, 0d, 1e>
+    llhd.drv %a, %u after %0 : !hw.inout<i42>
+    // CHECK-NOT: llhd.prb
+    %1 = llhd.prb %a : !hw.inout<i42>
+    // CHECK-NEXT: call @use_i42(%u)
+    func.call @use_i42(%1) : (i42) -> ()
+    // CHECK-NEXT: llhd.constant_time
+    // CHECK-NEXT: llhd.drv %a, %u
+    // CHECK-NEXT: llhd.yield %u
+    llhd.yield %1 : i42
+  }
 }
 
 // Drive forwarding across reconvergent control flow.
@@ -978,3 +992,16 @@ hw.module @CombCreateDynamicInject(in %u: i42, in %v: i10, in %q: i1) {
 func.func private @use_i42(%arg0: i42)
 func.func private @use_inout_i42(%arg0: !hw.inout<i42>)
 func.func private @use_array_i42(%arg0: !hw.array<4xi42>)
+
+// Regression test that verifies probe is inserted post use.
+// CHECK-LABEL: ProbePostDef
+hw.module @ProbePostDef() {
+  %2 = llhd.combinational -> i1 {
+    %false = hw.constant false
+    %e = llhd.sig %false : i1
+    %4 = llhd.prb %e : !hw.inout<i1>
+    llhd.yield %4 : i1
+  }
+  hw.output
+}
+

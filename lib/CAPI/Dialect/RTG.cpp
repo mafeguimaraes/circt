@@ -10,6 +10,8 @@
 #include "circt/Dialect/RTG/IR/RTGAttributes.h"
 #include "circt/Dialect/RTG/IR/RTGDialect.h"
 #include "circt/Dialect/RTG/IR/RTGTypes.h"
+#include "circt/Dialect/RTG/Transforms/RTGPassPipelines.h"
+#include "circt/Dialect/RTG/Transforms/RTGPasses.h"
 
 #include "mlir/CAPI/Registration.h"
 
@@ -21,6 +23,11 @@ using namespace circt::rtg;
 //===----------------------------------------------------------------------===//
 
 MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(RTG, rtg, RTGDialect)
+
+void registerRTGPasses() {
+  circt::rtg::registerPasses();
+  circt::rtg::registerPipelines();
+}
 
 //===----------------------------------------------------------------------===//
 // Type API.
@@ -127,6 +134,29 @@ bool rtgTypeIsAArray(MlirType type) { return isa<ArrayType>(unwrap(type)); }
 
 MlirType rtgArrayTypeGetElementType(MlirType type) {
   return wrap(cast<ArrayType>(unwrap(type)).getElementType());
+}
+
+// TupleType
+//===----------------------------------------------------------------------===//
+
+MlirType rtgTupleTypeGet(MlirContext ctxt, intptr_t numFields,
+                         MlirType const *fieldTypes) {
+  SmallVector<Type> types;
+  for (unsigned i = 0; i < numFields; ++i)
+    types.emplace_back(unwrap(fieldTypes[i]));
+  return wrap(rtg::TupleType::get(unwrap(ctxt), types));
+}
+
+bool rtgTypeIsATuple(MlirType type) {
+  return isa<rtg::TupleType>(unwrap(type));
+}
+
+intptr_t rtgTypeGetNumFields(MlirType type) {
+  return cast<rtg::TupleType>(unwrap(type)).getFieldTypes().size();
+}
+
+MlirType rtgTupleTypeGetFieldType(MlirType type, intptr_t idx) {
+  return wrap(cast<rtg::TupleType>(unwrap(type)).getFieldTypes()[idx]);
 }
 
 // ImmediateType

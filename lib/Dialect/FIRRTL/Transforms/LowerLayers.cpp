@@ -94,12 +94,18 @@ static void appendName(StringRef name, SmallString<32> &output,
   output[i] = llvm::toLower(output[i]);
 }
 
+static void appendName(const ArrayRef<FlatSymbolRefAttr> &names,
+                       SmallString<32> &output, bool toLower = false,
+                       Delimiter delimiter = Delimiter::BindFile) {
+  for (auto name : names)
+    appendName(name.getValue(), output, toLower, delimiter);
+}
+
 static void appendName(SymbolRefAttr name, SmallString<32> &output,
                        bool toLower = false,
                        Delimiter delimiter = Delimiter::BindFile) {
   appendName(name.getRootReference(), output, toLower, delimiter);
-  for (auto nested : name.getNestedReferences())
-    appendName(nested.getValue(), output, toLower, delimiter);
+  appendName(name.getNestedReferences(), output, toLower, delimiter);
 }
 
 /// For a layer `@A::@B::@C` in module Module,
@@ -133,16 +139,23 @@ static SmallString<32> instanceNameForLayer(SymbolRefAttr layerName) {
   return result;
 }
 
+static SmallString<32> fileNameForLayer(StringRef moduleName, StringAttr root,
+                                        ArrayRef<FlatSymbolRefAttr> nested) {
+  SmallString<32> result;
+  result.append("layers");
+  appendName(moduleName, result);
+  appendName(root, result);
+  appendName(nested, result);
+  result.append(".sv");
+  return result;
+}
+
 /// For all layerblocks `@A::@B::@C` in a module called Module,
 /// the output filename is `layers-Module-A-B-C.sv`.
 static SmallString<32> fileNameForLayer(StringRef moduleName,
                                         SymbolRefAttr layerName) {
-  SmallString<32> result;
-  result.append("layers");
-  appendName(moduleName, result);
-  appendName(layerName, result);
-  result.append(".sv");
-  return result;
+  return fileNameForLayer(moduleName, layerName.getRootReference(),
+                          layerName.getNestedReferences());
 }
 
 /// For all layerblocks `@A::@B::@C` in a module called Module,
@@ -160,8 +173,7 @@ static SmallString<32> guardMacroNameForLayer(StringRef moduleName,
 static SmallString<32>
 macroNameForLayer(StringRef circuitName,
                   ArrayRef<FlatSymbolRefAttr> layerName) {
-  SmallString<32> result("layer_");
-  result.append(circuitName);
+  SmallString<32> result("layer");
   for (auto part : layerName)
     appendName(part, result, /*toLower=*/false,
                /*delimiter=*/Delimiter::InlineMacro);
@@ -237,7 +249,15 @@ class LowerLayersPass
 
   /// Build the bindfile skeletons for each module. Set up a table which tells
   /// us for each module/layer pair, where to insert the bind operations.
-  void preprocessModule(CircuitNamespace &ns, InstanceGraphNode *node);
+  void preprocessModuleLike(CircuitNamespace &ns, InstanceGraphNode *node);
+
+  /// Build the bindfile skeleton for a module.
+  void preprocessModule(CircuitNamespace &ns, InstanceGraphNode *node,
+                        FModuleOp module);
+
+  /// Record the supposed bindfiles for any known layers of the ext module.
+  void preprocessExtModule(CircuitNamespace &ns, InstanceGraphNode *node,
+                           FExtModuleOp extModule);
 
   /// Build a bindfile skeleton for a particular module and layer.
   void buildBindFile(CircuitNamespace &ns, InstanceGraphNode *node,
@@ -278,8 +298,8 @@ FModuleOp LowerLayersPass::buildNewModule(OpBuilder &builder,
   auto location = layerBlock.getLoc();
   auto namehint = layerBlockGlobals.lookup(layerBlock).moduleName;
   llvm::sys::SmartScopedLock<true> instrumentationLock(*circuitMutex);
-  FModuleOp newModule = builder.create<FModuleOp>(
-      location, builder.getStringAttr(namehint),
+  FModuleOp newModule = FModuleOp::create(
+      builder, location, builder.getStringAttr(namehint),
       ConventionAttr::get(builder.getContext(), Convention::Internal),
       ArrayRef<PortInfo>{}, ArrayAttr{});
   if (auto dir = getOutputFile(layerBlock.getLayerNameAttr())) {
@@ -341,7 +361,13 @@ LowerLayersPass::runOnModuleLike(FModuleLike moduleLike) {
             removeLayersFromPorts(op);
             return runOnModuleBody(op, innerRefMap);
           })
-          .Case<FExtModuleOp, FIntModuleOp, FMemModuleOp>([&](auto op) {
+          .Case<FExtModuleOp>([&](auto op) {
+            op.setKnownLayers({});
+            op.setLayers({});
+            removeLayersFromPorts(op);
+            return success();
+          })
+          .Case<FIntModuleOp, FMemModuleOp>([&](auto op) {
             op.setLayers({});
             removeLayersFromPorts(op);
             return success();
@@ -360,7 +386,7 @@ void LowerLayersPass::lowerInlineLayerBlock(LayerOp layer,
                                             LayerBlockOp layerBlock) {
   OpBuilder builder(layerBlock);
   auto macroName = macroNames[layer];
-  auto ifDef = builder.create<sv::IfDefOp>(layerBlock.getLoc(), macroName);
+  auto ifDef = sv::IfDefOp::create(builder, layerBlock.getLoc(), macroName);
   ifDef.getBodyRegion().takeBody(layerBlock.getBodyRegion());
   layerBlock.erase();
 }
@@ -395,9 +421,9 @@ LogicalResult LowerLayersPass::runOnModuleBody(FModuleOp moduleOp,
         nameHint.append(opName);
       }
     }
-    return nodeOp = builder.create<NodeOp>(
-               operand.getLoc(), operand,
-               nameHint.empty() ? "_layer_probe" : StringRef(nameHint));
+    return nodeOp = NodeOp::create(builder, operand.getLoc(), operand,
+                                   nameHint.empty() ? "_layer_probe"
+                                                    : StringRef(nameHint));
   };
 
   // Determine the replacement for an operand within the current region.  Keep a
@@ -449,8 +475,8 @@ LogicalResult LowerLayersPass::runOnModuleBody(FModuleOp moduleOp,
       OpBuilder::InsertionGuard guard(localBuilder);
       auto zeroUIntType = UIntType::get(localBuilder.getContext(), 0);
       replacement = localBuilder.createOrFold<BitCastOp>(
-          value.getType(), localBuilder.create<ConstantOp>(
-                               zeroUIntType, getIntZerosAttr(zeroUIntType)));
+          value.getType(), ConstantOp::create(localBuilder, zeroUIntType,
+                                              getIntZerosAttr(zeroUIntType)));
     } else {
       auto *definingOp = value.getDefiningOp();
       hw::InnerRefAttr innerRef;
@@ -483,8 +509,8 @@ LogicalResult LowerLayersPass::runOnModuleBody(FModuleOp moduleOp,
         hierPathOp.setVisibility(SymbolTable::Visibility::Private);
       }
 
-      replacement = localBuilder.create<XMRDerefOp>(
-          value.getType(), hierPathOp.getSymNameAttr());
+      replacement = XMRDerefOp::create(localBuilder, value.getType(),
+                                       hierPathOp.getSymNameAttr());
     }
 
     replacements.insert({value, replacement});
@@ -699,8 +725,8 @@ LogicalResult LowerLayersPass::runOnModuleBody(FModuleOp moduleOp,
     auto innerSym =
         hw::InnerSymAttr::get(builder.getStringAttr(ns.newName(instanceName)));
 
-    auto instanceOp = builder.create<InstanceOp>(
-        layerBlock.getLoc(), /*moduleName=*/newModule,
+    auto instanceOp = InstanceOp::create(
+        builder, layerBlock.getLoc(), /*moduleName=*/newModule,
         /*name=*/
         instanceName, NameKindEnum::DroppableName,
         /*annotations=*/ArrayRef<Attribute>{},
@@ -714,9 +740,11 @@ LogicalResult LowerLayersPass::runOnModuleBody(FModuleOp moduleOp,
     createdInstances.try_emplace(instanceOp, newModule);
 
     // create the bind op.
-    OpBuilder::atBlockEnd(bindFiles[moduleOp][layer].body)
-        .create<BindOp>(layerBlock.getLoc(), moduleOp.getModuleNameAttr(),
-                        instanceOp.getInnerSymAttr().getSymName());
+    {
+      auto builder = OpBuilder::atBlockEnd(bindFiles[moduleOp][layer].body);
+      BindOp::create(builder, layerBlock.getLoc(), moduleOp.getModuleNameAttr(),
+                     instanceOp.getInnerSymAttr().getSymName());
+    }
 
     LLVM_DEBUG(llvm::dbgs() << "        moved inner refs:\n");
     for (hw::InnerSymAttr innerSym : innerSyms) {
@@ -769,8 +797,8 @@ void LowerLayersPass::preprocessLayers(CircuitNamespace &ns, OpBuilder &b,
     if (macName != symName)
       macNameAttr = StringAttr::get(ctx, macName);
 
-    b.create<sv::MacroDeclOp>(layer->getLoc(), symNameAttr, ArrayAttr(),
-                              macNameAttr);
+    sv::MacroDeclOp::create(b, layer->getLoc(), symNameAttr, ArrayAttr(),
+                            macNameAttr);
     macroNames[layer] = FlatSymbolRefAttr::get(&getContext(), symNameAttr);
   }
   for (auto child : layer.getOps<LayerOp>())
@@ -817,19 +845,19 @@ void LowerLayersPass::buildBindFile(CircuitNamespace &ns,
     path = filename;
 
   // Declare the macro for the include guard.
-  b.create<sv::MacroDeclOp>(loc, macroSymbolAttr, ArrayAttr{}, macroNameAttr);
+  sv::MacroDeclOp::create(b, loc, macroSymbolAttr, ArrayAttr{}, macroNameAttr);
 
   // Create the emit op.
-  auto bindFile = b.create<emit::FileOp>(loc, path);
+  auto bindFile = emit::FileOp::create(b, loc, path);
   OpBuilder::InsertionGuard _(b);
   b.setInsertionPointToEnd(bindFile.getBody());
 
   // Create the #ifndef for the include guard.
-  auto includeGuard = b.create<sv::IfDefOp>(loc, macroSymbolRefAttr);
+  auto includeGuard = sv::IfDefOp::create(b, loc, macroSymbolRefAttr);
   b.createBlock(&includeGuard.getElseRegion());
 
   // Create the #define for the include guard.
-  b.create<sv::MacroDefOp>(loc, macroSymbolRefAttr);
+  sv::MacroDefOp::create(b, loc, macroSymbolRefAttr);
 
   // Create IR to enable any parent layers.
   auto parent = layer->getParentOfType<LayerOp>();
@@ -838,14 +866,14 @@ void LowerLayersPass::buildBindFile(CircuitNamespace &ns,
     // The parent bindfile will enable all ancestors.
     if (parent.getConvention() == LayerConvention::Bind) {
       auto target = bindFiles[module][parent].filename;
-      b.create<sv::IncludeOp>(loc, IncludeStyle::Local, target);
+      sv::IncludeOp::create(b, loc, IncludeStyle::Local, target);
       break;
     }
 
     // If the parent layer is inline, we enable it by defining a macro.
     // We will also have to manually enable any subsequent ancestors.
     auto parentMacroSymbol = macroNames[parent];
-    b.create<sv::MacroDefOp>(loc, parentMacroSymbol);
+    sv::MacroDefOp::create(b, loc, parentMacroSymbol);
     parent = layer->getParentOfType<LayerOp>();
   }
 
@@ -859,8 +887,8 @@ void LowerLayersPass::buildBindFile(CircuitNamespace &ns,
     auto files = bindFiles[child];
     auto lookup = files.find(layer);
     if (lookup != files.end())
-      b.create<sv::IncludeOp>(loc, IncludeStyle::Local,
-                              lookup->second.filename);
+      sv::IncludeOp::create(b, loc, IncludeStyle::Local,
+                            lookup->second.filename);
   }
 
   // Save the bind file information for later.
@@ -870,14 +898,8 @@ void LowerLayersPass::buildBindFile(CircuitNamespace &ns,
 }
 
 void LowerLayersPass::preprocessModule(CircuitNamespace &ns,
-                                       InstanceGraphNode *node) {
-  auto *op = node->getModule().getOperation();
-  if (!op)
-    return;
-
-  auto module = dyn_cast<FModuleOp>(op);
-  if (!module)
-    return;
+                                       InstanceGraphNode *node,
+                                       FModuleOp module) {
 
   OpBuilder b(&getContext());
   b.setInsertionPointAfter(module);
@@ -931,13 +953,62 @@ void LowerLayersPass::preprocessModule(CircuitNamespace &ns,
       buildBindFile(ns, node, b, sym, layer);
 }
 
+void LowerLayersPass::preprocessExtModule(CircuitNamespace &ns,
+                                          InstanceGraphNode *node,
+                                          FExtModuleOp extModule) {
+  // For each known layer of the extmodule, compute and record the bindfile
+  // name. When a layer is known, its parent layers are implicitly known,
+  // so compute bindfiles for parent layers too. Use a set to avoid
+  // repeated work, which can happen if, for example, both a child layer and
+  // a parent layer are explicitly declared to be known.
+  auto known = extModule.getKnownLayersAttr().getAsRange<SymbolRefAttr>();
+  if (known.empty())
+    return;
+
+  auto moduleName = extModule.getModuleName();
+  auto &files = bindFiles[extModule];
+  SmallPtrSet<Operation *, 8> seen;
+
+  for (auto name : known) {
+    auto layer = symbolToLayer[name];
+    auto rootLayerName = name.getRootReference();
+    auto nestedLayerNames = name.getNestedReferences();
+    while (layer && std::get<bool>(seen.insert(layer))) {
+      if (layer.getConvention() == LayerConvention::Bind) {
+        BindFileInfo info;
+        auto filename =
+            fileNameForLayer(moduleName, rootLayerName, nestedLayerNames);
+        info.filename = StringAttr::get(&getContext(), filename);
+        info.body = nullptr;
+        files.insert({layer, info});
+      }
+      layer = layer->getParentOfType<LayerOp>();
+      if (!nestedLayerNames.empty())
+        nestedLayerNames = nestedLayerNames.drop_back();
+    }
+  }
+}
+
+void LowerLayersPass::preprocessModuleLike(CircuitNamespace &ns,
+                                           InstanceGraphNode *node) {
+  auto *op = node->getModule().getOperation();
+  if (!op)
+    return;
+
+  if (auto module = dyn_cast<FModuleOp>(op))
+    return preprocessModule(ns, node, module);
+
+  if (auto extModule = dyn_cast<FExtModuleOp>(op))
+    return preprocessExtModule(ns, node, extModule);
+}
+
 /// Create the bind file skeleton for each layer, for each module.
 void LowerLayersPass::preprocessModules(CircuitNamespace &ns,
                                         InstanceGraph &ig) {
   DenseSet<InstanceGraphNode *> visited;
   for (auto *root : ig)
     for (auto *node : llvm::post_order_ext(root, visited))
-      preprocessModule(ns, node);
+      preprocessModuleLike(ns, node);
 }
 
 /// Process a circuit to remove all layer blocks in each module and top-level
@@ -1030,8 +1101,4 @@ void LowerLayersPass::runOnOperation() {
   symbolToLayer.clear();
   hierPathCache = nullptr;
   bindFiles.clear();
-}
-
-std::unique_ptr<mlir::Pass> circt::firrtl::createLowerLayersPass() {
-  return std::make_unique<LowerLayersPass>();
 }
